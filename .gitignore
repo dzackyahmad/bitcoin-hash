@@ -1,0 +1,20 @@
+# Program Bitcoin Core (besar; dipasang manual per mesin, lihat brief/Dokumentasi.md)
+bitcoin-*/
+
+# Data node yang dibuat otomatis saat berjalan
+node_data/
+node_data_baseline/
+
+# Lingkungan & cache Python
+.venv/
+__pycache__/
+*.pyc
+
+# CSV hasil uji kecil (hasil run penuh results/hasil_percobaan.csv TIDAK diabaikan)
+results/uji_*.csv
+
+# Paper & proposal referensi (tidak dipublikasikan)
+ide_dan_referensi/
+
+# File sistem
+.DS_Store

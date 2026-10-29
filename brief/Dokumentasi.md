@@ -1,0 +1,411 @@
+# Dokumentasi Proyek — Pengujian Empiris Double Spending pada Bitcoin Core Regtest
+
+Dokumen ini menjelaskan cara kerja proyek dari awal sampai Tahap 3, sesuai kode
+terakhir di `src/`. Tujuannya: siapa pun yang membuka repo ini (termasuk di laptop
+ROG) bisa memahami apa yang sudah dikerjakan, keputusan apa yang sudah diambil, dan
+bagaimana melanjutkan run penuh.
+
+Status: **Tahap 0–3 selesai dan teruji di macOS.** Run penuh (63.000 percobaan)
+belum dijalankan; rencananya dijalankan di laptop ROG. Tahap 4 (analisis) dan
+Tahap 5 (kesimpulan) belum dikerjakan.
+
+Acuan rencana: `brief/plan_eksekusi.md`. Jika ada perbedaan, plan yang berlaku.
+
+---
+
+## 1. Proyek ini tentang apa?
+
+Bitcoin mencegah orang memakai koin yang sama dua kali (double spending) dengan
+cara jaringan selalu mengikuti **rantai blok terpanjang**. Tetapi perlindungan ini
+tidak mutlak: penyerang yang punya cukup daya tambang bisa diam-diam membangun
+rantai tandingan, lalu merilisnya ketika rantainya lebih panjang. Akibatnya,
+pembayaran yang sudah "terkonfirmasi" di sisi penjual bisa lenyap.
+
+Proyek ini **menjalankan serangan itu sungguhan** pada perangkat lunak Bitcoin asli
+(Bitcoin Core) di jaringan privat lokal (regtest), berulang kali, dengan
+memvariasikan:
+
+- **p** — porsi daya tambang (hashrate) penyerang;
+- **k** — jumlah konfirmasi yang ditunggu penjual sebelum menganggap lunas.
+
+Tingkat keberhasilan serangan lalu dibandingkan dengan rumus teoretis Nakamoto
+(2008). Proyek ini menjawab saran penelitian lanjutan Hakim & Irwanto (2026):
+memakai perangkat lunak Bitcoin nyata dan menguji skenario fork.
+
+**Batasan etis:** semua dijalankan hanya di regtest lokal (127.0.0.1) dengan koin
+uji. Tidak menyentuh mainnet, testnet publik, node orang lain, atau exchange.
+
+---
+
+## 2. Istilah dasar
+
+| Istilah | Arti sederhana |
+|---|---|
+| Blok | "Halaman" buku besar Bitcoin berisi sekumpulan transaksi. |
+| Rantai blok | Blok-blok yang saling menyambung; tiap blok menunjuk blok sebelumnya. |
+| Menambang | Membuat blok baru. Di regtest sangat cepat (tidak perlu daya komputasi besar). |
+| Hashrate | Kecepatan menambang. Di proyek ini diemulasikan lewat undian (lihat bagian 4). |
+| Konfirmasi | Jumlah blok yang menumpuk di atas transaksi. Blok pemuat transaksi = konfirmasi ke-1. |
+| Mempool | Ruang tunggu transaksi yang sudah diterima node tetapi belum masuk blok. |
+| UTXO | Koin yang belum dibelanjakan. Satu UTXO hanya boleh dibelanjakan sekali. |
+| Double spending | Membelanjakan UTXO yang sama dua kali (ke penjual, lalu kembali ke diri sendiri). |
+| Fork | Dua rantai bersaing yang bercabang dari blok yang sama. |
+| Reorg | Node pindah ke rantai lain yang lebih panjang; blok di rantai lama dibuang. |
+| Regtest | Mode jaringan Bitcoin privat lokal untuk pengujian, dengan koin uji. |
+| RPC | Cara skrip Python memberi perintah ke node Bitcoin Core. |
+| Node | Satu program `bitcoind` yang menjalankan Bitcoin Core. |
+
+---
+
+## 3. Parameter terkunci
+
+| Parameter | Nilai | Dasar |
+|---|---|---|
+| p (porsi hashrate penyerang) | 0,05–0,45, loncatan 0,05 (9 nilai) | p < 0,5 (Nakamoto 2008; Rosenfeld 2014) |
+| k (konfirmasi) | 0–6 (7 nilai) | Ambang 6 konfirmasi (Nakamoto; Rosenfeld) |
+| N (percobaan per kombinasi) | 1.000 | Praktik Monte Carlo (Cao et al. 2023; Jiang & Zhang 2024) |
+| Total percobaan | 9 × 7 × 1.000 = 63.000 | — |
+| Aturan berhenti | penyerang menyerah setelah menambang 20 blok tanpa menyusul | Sompolinsky & Zohar 2016; nilai 20 dari Rosenfeld 2014 §6 |
+| Pre-mine | tidak ada | Penyederhanaan model |
+| Seri (rantai sama panjang) | dihitung GAGAL | Definisi operasional plan |
+| Model pembanding | Nakamoto (2008), dengan z = k | Pertanyaan riset |
+| Seed acak | `2026`; seed per percobaan `"2026\|p=0.05\|k=0\|i=0"` | Reproduksibilitas |
+| Bitcoin Core | v32.1.0 (paket resmi, checksum SHA256 diverifikasi) | Versi stabil terbaru saat setup |
+
+---
+
+## 4. Cara kerja satu percobaan
+
+Ada 3 node di satu laptop, masing-masing dengan port sendiri dan hanya bisa diakses
+dari 127.0.0.1:
+
+- **merchant** — penjual yang menerima pembayaran;
+- **honest** — penambang jujur yang menambang rantai publik;
+- **attacker** — penyerang.
+
+**Desain paralel (keputusan "b"):** penyerang mulai menambang rantai rahasia SEJAK
+pembayaran disiarkan, termasuk selama penjual menunggu konfirmasi. Ini wajib agar
+setara dengan model Nakamoto. (Jika penyerang baru mulai setelah k konfirmasi, ia
+selalu tertinggal k blok dan yang diuji adalah skenario lain.)
+
+Satu percobaan (`trial.jalankan_satu_percobaan`) terdiri dari 7 langkah:
+
+1. **Reset ke baseline didanai.** Ketiga node dikembalikan ke kondisi tersimpan:
+   rantai setinggi 101 blok, penyerang punya tepat satu koin matang 50 BTC.
+2. **Fase pembuka.**
+   - Penyerang membuat dua transaksi dari koin yang SAMA, lewat raw transaction
+     (`createrawtransaction` + `signrawtransactionwithwallet`):
+     - **tx A**: 10 BTC ke merchant + 39,9999 BTC kembalian ke penyerang;
+     - **tx B**: 49,9999 BTC kembali ke penyerang (tandingan).
+     Fee keduanya sama: 0,0001 BTC.
+   - Penyerang **diputus** dari jaringan (`setnetworkactive false`).
+   - tx A dikirim langsung ke merchant dan honest.
+   - Cek anti-bocor: tx A ada di mempool merchant & honest, mempool penyerang
+     kosong, tx B tidak ada di mempool mana pun, semua node masih di titik fork.
+3. **Undian blok.** Tiap langkah satu blok ditambang: dengan peluang p oleh
+   penyerang (rantai rahasia), selain itu oleh honest (rantai publik). tx B masuk
+   blok penyerang pertama; tx A masuk blok honest pertama kapan pun terjadi; blok
+   lainnya kosong. Blok dibuat dengan `generateblock` agar isinya pasti.
+4. **Lunas.** Merchant menganggap lunas saat tx A punya k konfirmasi (n ≥ k).
+   Untuk k = 0, lunas saat tx A masuk mempool. Konfirmasi dicek langsung di wallet
+   merchant.
+5. **Kapan berhenti** (dicek setelah tiap blok, MENANG dicek lebih dulu):
+   - menang: n ≥ k **dan** m > n (m = blok penyerang, n = blok honest);
+   - berhenti awal: n ≥ 20 (penyerang sudah pasti gagal, lihat temuan T5);
+   - menyerah: m ≥ 20 dan m ≤ n.
+6. **Penyerang disambung kembali.** Sebelumnya dicek lagi: tinggi kedua rantai
+   cocok dengan m dan n, blok rahasia belum bocor, blok publik belum sampai ke
+   penyerang. Lalu jaringan memilih rantai terpanjang (reorg bila penyerang menang).
+7. **Penentuan sukses di node merchant.** Berhasil jika SEMUA benar:
+   - blok pemuat tx B ada di rantai aktif merchant;
+   - tx A hilang: blok pemuatnya tidak di rantai aktif DAN tx A tidak kembali ke
+     mempool;
+   - cabang publik lama berstatus `valid-fork` di `getchaintips` (dilewati bila
+     n = 0, karena tidak ada cabang publik).
+
+   **Cek silang:** hasil ini harus sama dengan hasil undian. Jika berbeda, itu
+   tanda bug, dan percobaan berhenti dengan `GalatVerifikasi` (tidak dicatat).
+
+Gambaran sederhana (contoh k = 2, urutan undian J P P J P → penyerang menang):
+
+```
+titik fork (blok 101)
+ ├─ rantai publik  (honest):  [A] [-]            ← tx A di blok pertama
+ └─ rantai rahasia (attacker): [B] [-] [-]       ← tx B di blok pertama
+Setelah disambung: rantai rahasia (3 blok) > publik (2 blok) → reorg,
+tx A lenyap dari rantai merchant, tx B terkonfirmasi.
+```
+
+---
+
+## 5. Tugas tiap file
+
+```
+config/
+  merchant.conf, honest.conf, attacker.conf   konfigurasi 3 node (regtest=1, port,
+                                              hanya 127.0.0.1, tanpa Tor/peer otomatis)
+src/
+  network.py   nyalakan/matikan node, RPC, sambung/putus penyerang, sinkronisasi,
+               reset (bersih total & ke baseline didanai)
+  trial.py     baseline didanai, pembuatan tx A/tx B, cek anti-bocor, undian
+               paralel, penentuan sukses, satu percobaan utuh (Langkah 1–7)
+  runner.py    loop p × k × N, CSV inkremental, resumable, progres + perkiraan waktu
+brief/
+  plan_eksekusi.md   rencana & parameter terkunci
+  CLAUDE.md          konteks proyek
+  Dokumentasi.md     dokumen ini
+```
+
+Folder yang dibuat otomatis saat berjalan (tidak masuk repo):
+
+- `bitcoin-32.1/` — program Bitcoin Core (dipasang manual, lihat bagian 8);
+- `node_data/` — data ketiga node yang sedang berjalan (aman dihapus);
+- `node_data_baseline/` — salinan baseline didanai (dibuat otomatis oleh runner);
+- `results/` — CSV hasil.
+
+Kode `src/` hanya memakai pustaka standar Python (tanpa paket tambahan).
+
+---
+
+## 6. Progres per tahap
+
+### Tahap 0 — Setup
+- Bitcoin Core **v32.1.0** (`bitcoin-32.1-arm64-apple-darwin.tar.gz`) diunduh dari
+  bitcoincore.org; checksum SHA256 cocok dengan `SHA256SUMS` resmi.
+- Binari macOS di-self-sign (`xattr -d com.apple.quarantine`, `codesign -s -`).
+- Verifikasi: `bitcoind -regtest` menyala dengan `chain=regtest`, lalu dimatikan.
+- Python 3.11.9.
+
+### Tahap 1 — Jaringan (`network.py`)
+| Langkah | Isi | Hasil uji |
+|---|---|---|
+| 1.1 | Konfigurasi 3 node, nyalakan/matikan | 3 node `chain=regtest`, port hanya 127.0.0.1 |
+| 1.2 | Sambung (`addnode onetry`), putus penyerang (`setnetworkactive false`) | Tiap node 2 peer; setelah diputus penyerang 0 peer, merchant–honest tetap 1 peer; tidak tersambung ulang otomatis; sambungan paksa ke penyerang ditolak |
+| 1.3 | Sinkronisasi (`tunggu_sinkron` membandingkan hash ujung rantai) | Blok menyebar saat tersambung; saat terisolasi blok tidak menyeberang dua arah; setelah disambung jaringan menyatu ke rantai terpanjang |
+| 1.4 | Reset bersih total | Kembali ke genesis, mempool & wallet kosong, ~1–1,6 detik |
+
+### Tahap 2 — Satu percobaan (`trial.py`)
+| Langkah | Isi | Hasil uji |
+|---|---|---|
+| 2.1 | Baseline didanai (dibuat sekali, ~13 detik) + reset ke baseline (salin datadir) | Tinggi 101, penyerang 1 koin 50 BTC; reset ~2,3 detik |
+| 2.2 | tx A & tx B dari UTXO yang sama | Input identik, txid beda; masing-masing lolos `testmempoolaccept`, bersama ditolak (`conflict-in-package`); belum tersiar |
+| 2.3 | Fase pembuka + cek anti-bocor | Lolos; 5 jenis kebocoran yang sengaja dibuat semuanya terdeteksi |
+| 2.4 | Undian paralel | 7 kasus batas dengan urutan undian paksa lolos; 1,26 juta urutan acak membuktikan berhenti-awal tidak mengubah hasil |
+| 2.5 | Penyatuan & penentuan sukses + percobaan utuh | Menang (reorg 2 dan 6 blok), kalah, k = 0, dan 3 skenario ketidakcocokan (berhenti dengan galat) lolos; seed sama → hasil identik |
+
+### Tahap 3 — Otomasi (`runner.py`)
+- Loop p × k × N, reset ke baseline tiap percobaan, CSV inkremental, resumable,
+  progres berkala.
+- `network.py` dibuat OS-agnostic: node dijalankan lewat `subprocess.Popen`
+  (opsi `-daemon` tidak ada di Windows), nama `bitcoind.exe` di Windows, node di
+  kelompok proses sendiri agar Ctrl+C hanya mengenai Python, dan proses node
+  "dipungut" agar tidak menumpuk sebagai zombie.
+- **Uji kecil di Mac** (p = 0,05 & 0,45; k = 0 & 3; N = 20 → 80 percobaan):
+
+  | Kombinasi | Berhasil |
+  |---|---|
+  | p = 0,05, k = 0 | 3/20 |
+  | p = 0,05, k = 3 | 0/20 |
+  | p = 0,45, k = 0 | 19/20 |
+  | p = 0,45, k = 3 | 13/20 |
+
+  Rata-rata **5,9 detik per percobaan** (Mac Apple Silicon).
+- **Uji resume:** run dihentikan dengan Ctrl+C dua kali (salah satunya tepat saat
+  node sedang dinyalakan), lalu dimatikan paksa (SIGKILL), lalu sengaja ditambah
+  baris CSV terpotong. Hasil:
+  - setelah Ctrl+C tidak ada bitcoind tertinggal;
+  - setelah SIGKILL satu bitcoind sempat tertinggal (Python mati seketika sehingga
+    tidak bisa membersihkan), dan dimatikan otomatis oleh sesi berikutnya;
+  - baris terpotong dibuang otomatis; setiap sesi melanjutkan dari posisi terakhir
+    ("Sudah selesai sebelumnya: 10/80 … 15/80 … 25/80");
+  - CSV akhir **identik baris demi baris** dengan run tanpa gangguan, tanpa
+    duplikat.
+
+---
+
+## 7. Keputusan & temuan penting
+
+**T1. Desain paralel (b).** Penyerang menambang sejak pembayaran disiarkan, agar
+setara model Nakamoto/Rosenfeld (bagian 4).
+
+**T2. Tiap node menambang ke alamatnya sendiri.** Saat uji 1.3, penyerang dan
+honest yang menambang ke coinbase yang sama, di atas blok induk yang sama, dalam
+detik yang sama menghasilkan blok yang **identik byte demi byte** (hash sama).
+Satu blok bisa "terhitung" di dua rantai dan merusak hasil. Karena itu alamat
+penambang selalu milik wallet node masing-masing (dan isi blok penyerang/honest
+juga berbeda karena memuat tx B/tx A).
+
+**T3. Cek `valid-fork` di node merchant.** Status cabang yang kalah berbeda antar
+node: di node yang tidak pernah memvalidasi blok lengkapnya, cabang itu tampil
+`headers-only`. Merchant adalah node yang melihat rantai publik penuh, jadi cek
+dilakukan di sana.
+
+**T4. Temuan RBF (Bitcoin Core v32).** Ketika tx A sudah di mempool, tx B ditolak
+dengan alasan `insufficient fee`: v32 menganggap transaksi yang konflik sebagai
+upaya penggantian (replace-by-fee). Seandainya tx B masuk mempool dengan fee lebih
+tinggi, ia bisa menggantikan tx A tanpa fork — itu *race attack* 0-konfirmasi yang
+di luar lingkup. Karena itu tx B **tidak pernah** masuk mempool mana pun (hanya
+disisipkan langsung ke blok rahasia) dan fee tx A = fee tx B. Desain tetap murni
+serangan berbasis fork.
+
+**T5. "Menyerah" tidak pernah tercapai.** Aturan menyerah (m ≥ 20 dan m ≤ n)
+hanya bisa terpenuhi jika n ≥ 20, padahal pada saat n mencapai 20 berhenti-awal
+sudah terpicu. Diuji pada 1,26 juta urutan acak: hasil menang/gagal **identik**
+dengan dan tanpa berhenti-awal (0 perbedaan). Implikasi:
+1. Di CSV, semua kegagalan tercatat `berhenti_awal`.
+2. Secara efektif aturan 20 blok = "serangan gagal bila rantai jujur mencapai 20
+   blok lebih dulu".
+3. **Cara baca grafik:** rumus Nakamoto mengasumsikan perlombaan tanpa batas,
+   sedangkan di sini perlombaan dipotong di 20 blok. Hasil empiris bisa sedikit di
+   bawah kurva Nakamoto, paling terlihat di p = 0,45. Ini akibat aturan berhenti,
+   bukan kesalahan implementasi.
+
+**T6. Sisi merchant: `walletconflicts` kosong, konfirmasi menjadi negatif.**
+- Wallet merchant hanya menyimpan transaksi yang menyentuh alamatnya. tx B tidak
+  membayar merchant, sehingga tidak pernah masuk wallet merchant dan
+  `walletconflicts` tetap kosong.
+- Konflik terlihat lewat **konfirmasi negatif** tx A, yang besarnya sama dengan
+  konfirmasi tx B (contoh: 2 → −3 saat m = 3; 6 → −7 saat m = 7).
+- Saldo merchant: pada k ≥ 1 saldo *terpercaya* 10 BTC turun menjadi 0 setelah
+  reorg; pada k = 0, 10 BTC hanya tampil sebagai saldo *tertunda*
+  (`untrusted_pending`), lalu menjadi 0. Artinya wallet merchant sempat
+  menyatakan dana "terpercaya" sebelum dana itu lenyap.
+
+**T7. Pelajaran sinkronisasi.** Saat membuat baseline, honest sempat menambang
+sebelum menerima blok penyerang, sehingga terjadi fork tak disengaja dan dana
+penyerang hilang. Perbaikan dan aturan umum: **setiap kali urutan blok penting,
+tunggu sinkron dulu.**
+
+**T8. Konvensi k dan pembanding.** Blok pemuat tx A = konfirmasi ke-1; merchant
+lunas saat konfirmasi ≥ k. Kurva Nakamoto di Tahap 4 memakai z = k dengan
+konvensi yang sama. k = 0 adalah titik kontrol (rumus Nakamoto memberi 1 di
+k = 0).
+
+**T9. Waktu.** Reset ke baseline ~2,3 detik (sebagian besar untuk menyalakan
+ulang node); tiap blok ~0,17 detik. Rata-rata ~5,9 detik per percobaan →
+run penuh ±103 jam (±4,3 hari) jika mesin secepat Mac uji. Keputusan: N tetap
+1.000, run penuh di ROG.
+
+---
+
+## 8. Menjalankan run penuh di ROG
+
+Kode sudah dibuat OS-agnostic, tetapi **baru diuji di macOS**. Karena itu
+jalankan uji kecil dulu (langkah 5) sebelum run penuh.
+
+### 8.1 Siapkan Python
+- Pasang Python 3.11 (atau lebih baru). Tidak perlu paket tambahan untuk
+  `runner.py`.
+
+### 8.2 Ambil kode
+```
+git clone https://github.com/dzackyahmad/bitcoin-hash.git
+cd bitcoin-hash
+```
+
+### 8.3 Pasang Bitcoin Core v32.1 (versi yang sama dengan uji di Mac)
+Unduh dari `https://bitcoincore.org/bin/bitcoin-core-32.1/`:
+
+- **Windows:** `bitcoin-32.1-win64.zip` dan `SHA256SUMS`.
+  Cek checksum (PowerShell):
+  ```
+  Get-FileHash bitcoin-32.1-win64.zip -Algorithm SHA256
+  ```
+  Bandingkan dengan baris `bitcoin-32.1-win64.zip` di `SHA256SUMS`.
+- **Linux:** `bitcoin-32.1-x86_64-linux-gnu.tar.gz`; cek dengan
+  `sha256sum --ignore-missing -c SHA256SUMS`.
+
+Ekstrak ke **root repo** sehingga programnya berada di:
+- Windows: `bitcoin-32.1\bin\bitcoind.exe`
+- Linux: `bitcoin-32.1/bin/bitcoind`
+
+(Folder ini sengaja tidak ada di repo karena besar.) Jika Windows Firewall
+bertanya, akses cukup untuk jaringan privat; node hanya memakai 127.0.0.1.
+
+### 8.4 Cegah laptop tidur
+Run penuh berjalan berhari-hari. Atur power plan agar laptop tidak sleep/hibernate
+saat dicolok listrik.
+
+### 8.5 Uji kecil dulu (±8 menit)
+Dari root repo:
+```
+python src/runner.py --p 0.05 0.45 --k 0 3 --n 20 --csv results/uji_kecil.csv
+```
+Baseline didanai dibuat otomatis pada run pertama (~15 detik).
+
+**Cek reproduksibilitas lintas mesin:** seed bersifat deterministik, jadi baris
+CSV di ROG harus **sama persis** dengan hasil di Mac. Contoh baris dari Mac:
+```
+0.05,0,0,True,1,0,menang,2026|p=0.05|k=0|i=0
+0.05,3,1,False,3,20,berhenti_awal,2026|p=0.05|k=3|i=1
+0.45,0,0,True,3,2,menang,2026|p=0.45|k=0|i=0
+0.45,3,1,False,12,20,berhenti_awal,2026|p=0.45|k=3|i=1
+0.45,3,19,True,11,10,menang,2026|p=0.45|k=3|i=19
+```
+Jumlah berhasil per kombinasi juga harus sama dengan tabel di bagian 6
+(Tahap 3): 3/20, 0/20, 19/20, 13/20. Jika berbeda, **jangan lanjut run penuh** —
+catat perbedaannya dan periksa dulu.
+
+### 8.6 Run penuh
+```
+python src/runner.py
+```
+- Hasil ditulis ke `results/hasil_percobaan.csv`, satu baris per percobaan.
+- Progres dicetak tiap 10 percobaan: `jumlah selesai/63000 (persen) | rata-rata
+  detik per percobaan | perkiraan sisa waktu`.
+- **Jika berhenti** (Ctrl+C, listrik mati, restart Windows): jalankan ulang
+  perintah yang sama. Runner membaca CSV, melewati percobaan yang sudah tercatat,
+  membuang baris terakhir bila terpotong, mematikan node sisa, lalu melanjutkan.
+- **Jika muncul `GalatVerifikasi`:** run sengaja berhenti karena ada pengecekan
+  kebenaran yang gagal (mis. transaksi bocor). Percobaan itu TIDAK dicatat. Simpan
+  pesan galatnya untuk diperiksa sebelum melanjutkan.
+- Jangan jalankan dua runner sekaligus (ketiganya memakai port dan folder yang
+  sama).
+
+---
+
+## 9. Membaca hasil CSV
+
+Kolom `results/hasil_percobaan.csv`:
+
+| Kolom | Arti |
+|---|---|
+| `p` | porsi hashrate penyerang (teks 2 desimal, mis. `0.05`) |
+| `k` | konfirmasi yang ditunggu merchant |
+| `i` | nomor percobaan dalam kombinasi (0–999) |
+| `berhasil` | `True` jika double spending berhasil (diverifikasi di node merchant) |
+| `m` | blok yang ditambang penyerang saat hasil sudah pasti |
+| `n` | blok yang ditambang honest saat hasil sudah pasti |
+| `alasan_berhenti` | `menang` atau `berhenti_awal` (lihat T5) |
+| `seed` | seed percobaan; menjalankan ulang seed yang sama memberi hasil sama |
+
+Tingkat keberhasilan satu kombinasi = jumlah `berhasil = True` ÷ 1.000 × 100%.
+Untuk sel dengan peluang sangat kecil, hasil 0 dari 1.000 adalah batas resolusi,
+bukan bukti peluang nol.
+
+---
+
+## 10. Batasan (wajib ditulis di laporan)
+
+- Regtest adalah lingkungan terkendali; hasil tidak merepresentasikan mainnet
+  (hashrate global, latensi, mempool, fee).
+- Hashrate penyerang diemulasikan lewat undian probabilistik, bukan daya tambang
+  nyata. Eksperimen ini memverifikasi apakah implementasi Bitcoin Core nyata
+  sesuai model pada kondisi ideal, bukan mengukur risiko mainnet.
+- Penyerang tidak melakukan pre-mine; seri dihitung gagal.
+- Aturan berhenti 20 blok (Rosenfeld 2014) memotong perlombaan; lihat T5 untuk
+  dampaknya pada perbandingan dengan Nakamoto.
+- Transaksi tidak disebarkan antar-node lewat relay biasa: tx A dikirim langsung
+  ke merchant dan honest (relay Bitcoin Core sengaja diberi jeda acak). Latensi
+  jaringan memang di luar lingkup.
+
+---
+
+## 11. Langkah berikutnya
+
+- **Tahap 3 (sisa):** run penuh 63.000 percobaan di ROG → `results/hasil_percobaan.csv`.
+- **Tahap 4 — `src/analysis.py`:** hitung persentase keberhasilan per (p, k),
+  tabel, grafik garis (X = k, satu garis per p), dan kurva Nakamoto (z = k)
+  pada grafik yang sama. Butuh pandas dan matplotlib.
+- **Tahap 5:** rekomendasi konfirmasi minimum per p, temuan sisi merchant (T6),
+  batasan, dan pembaruan dokumen ini sesuai kode final.
