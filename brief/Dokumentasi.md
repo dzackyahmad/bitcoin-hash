@@ -351,8 +351,9 @@ catat perbedaannya dan periksa dulu.
 python src/runner.py
 ```
 - Hasil ditulis ke `results/hasil_percobaan.csv`, satu baris per percobaan.
-- Progres dicetak tiap 10 percobaan: `jumlah selesai/63000 (persen) | rata-rata
-  detik per percobaan | perkiraan sisa waktu`.
+- Progres (heartbeat) dicetak tiap 10 percobaan, contoh:
+  `[2026-10-30 15:02:11] global 1240/63000 (2.0%) | sel (0.05, 1) 240/1000 | laju 0.169 trial/dtk | ETA 101:13:25`
+  (waktu, posisi global, posisi di sel (p, k), laju percobaan per detik, perkiraan sisa waktu).
 - **Jika berhenti** (Ctrl+C, listrik mati, restart Windows): jalankan ulang
   perintah yang sama. Runner membaca CSV, melewati percobaan yang sudah tercatat,
   membuang baris terakhir bila terpotong, mematikan node sisa, lalu melanjutkan.

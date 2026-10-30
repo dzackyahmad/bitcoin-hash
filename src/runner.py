@@ -163,21 +163,29 @@ def format_durasi(detik):
 
 
 def cetak_progres(jumlah_selesai, jumlah_total, dikerjakan_sesi_ini,
-                  waktu_mulai_sesi):
+                  waktu_mulai_sesi, sel_terakhir, jumlah_per_kombinasi):
     """
-    Cetak progres: berapa percobaan selesai dari total, rata-rata waktu
-    per percobaan di sesi ini, dan perkiraan sisa waktu.
+    Cetak satu baris heartbeat: posisi global (selesai dari total), posisi
+    di sel (p, k) yang sedang dikerjakan, laju percobaan per detik di sesi
+    ini, dan perkiraan sisa waktu (ETA).
+
+    sel_terakhir = (p, k, nomor_percobaan) dari percobaan terakhir yang
+    selesai. Nomor percobaan mulai dari 0, jadi yang dicetak nomor + 1
+    (jumlah percobaan sel itu yang sudah selesai).
     """
     lama_sesi = time.time() - waktu_mulai_sesi
-    rata_rata = lama_sesi / dikerjakan_sesi_ini
+    laju = dikerjakan_sesi_ini / lama_sesi
     sisa_percobaan = jumlah_total - jumlah_selesai
-    perkiraan_sisa = sisa_percobaan * rata_rata
+    perkiraan_sisa = sisa_percobaan / laju
     persen = 100 * jumlah_selesai / jumlah_total
+    p, k, nomor_percobaan = sel_terakhir
     print(
         f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
-        f"{jumlah_selesai}/{jumlah_total} ({persen:.1f}%) | "
-        f"rata-rata {rata_rata:.2f} s/percobaan | "
-        f"perkiraan sisa {format_durasi(perkiraan_sisa)}",
+        f"global {jumlah_selesai}/{jumlah_total} ({persen:.1f}%) | "
+        f"sel ({teks_p(p)}, {k}) "
+        f"{nomor_percobaan + 1}/{jumlah_per_kombinasi} | "
+        f"laju {laju:.3f} trial/dtk | "
+        f"ETA {format_durasi(perkiraan_sisa)}",
         flush=True,
     )
 
@@ -230,10 +238,13 @@ def jalankan_semua_percobaan(daftar_p, daftar_k, jumlah_per_kombinasi,
 
                     jumlah_selesai = jumlah_selesai + 1
                     dikerjakan_sesi_ini = dikerjakan_sesi_ini + 1
+                    # Ingat posisi percobaan terakhir untuk baris heartbeat.
+                    sel_terakhir = (p, k, nomor_percobaan)
                     if dikerjakan_sesi_ini % CETAK_PROGRES_SETIAP == 0:
                         cetak_progres(
                             jumlah_selesai, jumlah_total,
                             dikerjakan_sesi_ini, waktu_mulai_sesi,
+                            sel_terakhir, jumlah_per_kombinasi,
                         )
     finally:
         # Matikan node apa pun yang terjadi (selesai, galat, atau Ctrl+C).
@@ -242,7 +253,7 @@ def jalankan_semua_percobaan(daftar_p, daftar_k, jumlah_per_kombinasi,
     if dikerjakan_sesi_ini > 0:
         cetak_progres(
             jumlah_selesai, jumlah_total, dikerjakan_sesi_ini,
-            waktu_mulai_sesi,
+            waktu_mulai_sesi, sel_terakhir, jumlah_per_kombinasi,
         )
     print("Selesai.")
 
