@@ -52,6 +52,15 @@ KOLOM_CSV = [
 # Cetak progres setiap sekian percobaan.
 CETAK_PROGRES_SETIAP = 10
 
+# Baseline didanai dibuat ulang di awal tiap sesi dan setiap 20 jam.
+# Mengapa: blok di baseline memakai waktu saat baseline dibuat. Jika umurnya
+# lewat 24 jam, Bitcoin Core (setting default) menganggap node sedang
+# "Initial Block Download" dan hanya meminta header dari satu peer, sehingga
+# setelah penyerang disambung kembali, rantainya bisa tidak diminta dan node
+# tidak sinkron (TimeoutError). 20 jam memberi jarak aman dari batas 24 jam.
+# Lihat brief/Dokumentasi.md temuan T10.
+BUAT_ULANG_BASELINE_SETIAP_DETIK = 20 * 3600
+
 
 # ---------------------------------------------------------------------------
 # Seed & kunci percobaan
@@ -190,6 +199,25 @@ def cetak_progres(jumlah_selesai, jumlah_total, dikerjakan_sesi_ini,
     )
 
 
+def buat_ulang_baseline(alasan):
+    """
+    Buat ulang baseline didanai dengan fungsi yang sudah ada
+    (trial.buat_baseline_didanai), lalu cetak satu baris log.
+    Input: alasan pembuatan ulang (teks untuk log).
+    Output: waktu (time.time()) saat baseline selesai dibuat.
+    """
+    waktu_mulai = time.time()
+    trial.buat_baseline_didanai()
+    waktu_selesai = time.time()
+    print(
+        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+        f"baseline didanai dibuat ulang ({alasan}) dalam "
+        f"{waktu_selesai - waktu_mulai:.1f} dtk",
+        flush=True,
+    )
+    return waktu_selesai
+
+
 # ---------------------------------------------------------------------------
 # Loop utama
 # ---------------------------------------------------------------------------
@@ -216,9 +244,10 @@ def jalankan_semua_percobaan(daftar_p, daftar_k, jumlah_per_kombinasi,
     print(f"CSV: {file_csv}")
     print(f"Sudah selesai sebelumnya: {jumlah_selesai}/{jumlah_total}")
 
-    if not network.FOLDER_BASELINE.exists():
-        print("Baseline didanai belum ada; membuat baseline...")
-        trial.buat_baseline_didanai()
+    # Selalu buat baseline baru di awal sesi, karena baseline dari sesi
+    # sebelumnya bisa sudah berumur lebih dari 24 jam
+    # (lihat BUAT_ULANG_BASELINE_SETIAP_DETIK).
+    waktu_baseline_dibuat = buat_ulang_baseline("awal sesi")
 
     waktu_mulai_sesi = time.time()
     dikerjakan_sesi_ini = 0
@@ -229,6 +258,13 @@ def jalankan_semua_percobaan(daftar_p, daftar_k, jumlah_per_kombinasi,
                     kunci = kunci_percobaan(teks_p(p), k, nomor_percobaan)
                     if kunci in percobaan_selesai:
                         continue
+
+                    # Buat ulang baseline sebelum umurnya mendekati 24 jam.
+                    umur_baseline = time.time() - waktu_baseline_dibuat
+                    if umur_baseline >= BUAT_ULANG_BASELINE_SETIAP_DETIK:
+                        waktu_baseline_dibuat = buat_ulang_baseline(
+                            f"umur {format_durasi(umur_baseline)}"
+                        )
 
                     seed = buat_seed(p, k, nomor_percobaan)
                     hasil = trial.jalankan_satu_percobaan(p, k, seed)

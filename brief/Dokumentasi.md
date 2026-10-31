@@ -160,7 +160,8 @@ Folder yang dibuat otomatis saat berjalan (tidak masuk repo):
 
 - `bitcoin-32.1/` — program Bitcoin Core (dipasang manual, lihat bagian 8);
 - `node_data/` — data ketiga node yang sedang berjalan (aman dihapus);
-- `node_data_baseline/` — salinan baseline didanai (dibuat otomatis oleh runner);
+- `node_data_baseline/` — salinan baseline didanai (dibuat ulang otomatis oleh
+  runner di awal tiap sesi dan tiap 20 jam, lihat T10);
 - `results/` — CSV hasil.
 
 Kode `src/` hanya memakai pustaka standar Python (tanpa paket tambahan).
@@ -286,6 +287,35 @@ ulang node); tiap blok ~0,17 detik. Rata-rata ~5,9 detik per percobaan →
 run penuh ±103 jam (±4,3 hari) jika mesin secepat Mac uji. Keputusan: N tetap
 1.000, run penuh di ROG.
 
+**T10. Umur baseline harus di bawah 24 jam (ditemukan saat run penuh di ROG).**
+Blok di baseline memakai waktu saat baseline dibuat. Setelah 21.006 percobaan,
+saat baseline berumur ±30 jam, percobaan p = 0,20, k = 0, i = 6 (penyerang
+menang 1–0) berhenti dengan `TimeoutError` di `tunggu_sinkron`: setelah
+penyerang disambung kembali, merchant dan honest tidak meminta blok penyerang.
+- **Penyebab:** Bitcoin Core dengan setting default menganggap node yang ujung
+  rantainya lebih tua dari 24 jam sedang *Initial Block Download* (IBD). Dalam
+  mode itu node hanya meminta header dari satu peer. Di `debug.log`, merchant
+  dan honest tidak pernah keluar dari IBD; penyerang keluar hanya karena
+  menambang blok sendiri.
+- **Bukti:** dengan baseline lama galat terulang persis; dengan baseline baru
+  percobaan yang sama lolos.
+- **Penanganan:** `runner.py` membuat ulang baseline didanai (fungsi yang sama,
+  `trial.buat_baseline_didanai`) di awal tiap sesi dan setiap 20 jam, dan
+  mencetak satu baris log tiap kali. Konfigurasi node **tidak** diubah (tidak
+  memakai `-maxtipage`), karena yang diuji adalah Bitcoin Core dengan setting
+  default; yang dikelola hanya baseline sebagai fixture. `trial.py`, seed, dan
+  format CSV tidak berubah.
+- **Uji penanganan** (salinan terpisah, ambang dipendekkan menjadi 60 detik,
+  dimulai dari baseline lama ±30 jam): 60 percobaan, baseline dibuat ulang 5 kali
+  (1 di awal sesi + 4 di tengah run), tanpa galat. Dari 60 baris, 46 yang sudah
+  ada di CSV run penuh **identik** (0 berbeda), termasuk p = 0,20, k = 0,
+  i = 0–2; i = 6 lolos dengan hasil `True, m = 1, n = 0, menang`.
+- **Dampak ke hasil:** tidak ada. Hasil tiap percobaan ditentukan undian (seed)
+  dan diverifikasi silang di node merchant, sehingga baseline baru (hash blok
+  dan alamat berbeda) memberi baris CSV yang sama. Galat ini juga tidak bisa
+  menghasilkan baris salah: percobaan yang tidak sinkron berhenti sebelum
+  dicatat, sehingga 21.006 baris sebelum galat tetap valid.
+
 ---
 
 ## 8. Menjalankan run penuh di ROG
@@ -331,7 +361,8 @@ Dari root repo:
 ```
 python src/runner.py --p 0.05 0.45 --k 0 3 --n 20 --csv results/uji_kecil.csv
 ```
-Baseline didanai dibuat otomatis pada run pertama (~15 detik).
+Baseline didanai dibuat ulang otomatis di awal tiap run (~6–15 detik), lalu
+tiap 20 jam selama run (lihat T10).
 
 **Cek reproduksibilitas lintas mesin:** seed bersifat deterministik, jadi baris
 CSV di ROG harus **sama persis** dengan hasil di Mac. Contoh baris dari Mac:
@@ -357,6 +388,9 @@ python src/runner.py
 - **Jika berhenti** (Ctrl+C, listrik mati, restart Windows): jalankan ulang
   perintah yang sama. Runner membaca CSV, melewati percobaan yang sudah tercatat,
   membuang baris terakhir bila terpotong, mematikan node sisa, lalu melanjutkan.
+- Baseline didanai dibuat ulang di awal tiap sesi dan tiap 20 jam (T10). Tiap
+  kali terjadi, tercetak satu baris, contoh:
+  `[2026-10-31 20:29:51] baseline didanai dibuat ulang (umur 20:00:03) dalam 6.6 dtk`.
 - **Jika muncul `GalatVerifikasi`:** run sengaja berhenti karena ada pengecekan
   kebenaran yang gagal (mis. transaksi bocor). Percobaan itu TIDAK dicatat. Simpan
   pesan galatnya untuk diperiksa sebelum melanjutkan.
@@ -396,6 +430,11 @@ bukan bukti peluang nol.
 - Penyerang tidak melakukan pre-mine; seri dihitung gagal.
 - Aturan berhenti 20 blok (Rosenfeld 2014) memotong perlombaan; lihat T5 untuk
   dampaknya pada perbandingan dengan Nakamoto.
+- Baseline didanai (fixture awal tiap percobaan) dibuat ulang tiap ≤ 20 jam,
+  karena Bitcoin Core dengan setting default memperlakukan node yang ujung
+  rantainya berumur > 24 jam sebagai *Initial Block Download* dan berhenti
+  meminta rantai penyerang setelah disambung kembali (T10). Konfigurasi node
+  tidak diubah; hasil percobaan tidak bergantung pada baseline mana yang dipakai.
 - Transaksi tidak disebarkan antar-node lewat relay biasa: tx A dikirim langsung
   ke merchant dan honest (relay Bitcoin Core sengaja diberi jeda acak). Latensi
   jaringan memang di luar lingkup.
