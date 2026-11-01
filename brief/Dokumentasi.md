@@ -316,6 +316,62 @@ penyerang disambung kembali, merchant dan honest tidak meminta blok penyerang.
   menghasilkan baris salah: percobaan yang tidak sinkron berhenti sebelum
   dicatat, sehingga 21.006 baris sebelum galat tetap valid.
 
+**T11. TCP self-connect di port RPC (Windows, ditemukan saat run penuh di ROG).**
+Sekitar pukul 02.00 WIB tanggal 1 Nov run berhenti dengan
+`http.client.BadStatusLine: POST / HTTP/1.1` saat memanggil RPC, diikuti
+`subprocess.TimeoutExpired` di `matikan_node` (bitcoind merchant tidak keluar
+dalam 30 detik). Waktu pasti dan `debug.log` saat crash tidak bisa dipulihkan:
+sesi berikutnya menimpa `node_data/` dan waktu ubah CSV.
+- **Penyebab:** rentang port dinamis (port asal otomatis) Windows di ROG adalah
+  **1024–65535**, bukan bawaan Windows 49152–65535 (di macOS mulai 49152).
+  Port proyek 18501–18503 dan 18601–18603 berada di dalamnya. Saat bitcoind
+  belum/tidak mendengarkan port RPC-nya (sedang menyala atau mati), Windows
+  sesekali memberi port tujuan itu sendiri sebagai port asal, sehingga socket
+  tersambung ke dirinya sendiri: Python mengirim `POST / HTTP/1.1` dan membaca
+  request-nya sendiri sebagai jawaban. `BadStatusLine` bukan `OSError`, jadi
+  tidak ditangkap pengulangan di `tunggu_rpc_siap` dan runner berhenti.
+  `TimeoutExpired` adalah gejala lanjutan saat runner membereskan node.
+- **Bukti:**
+  1. Bukan sleep: Windows di ROG mencatat sleep/Modern Standby (event
+     Kernel-Power 42/107/506/507), tetapi event Kernel-Power terakhir adalah
+     30 Okt 14:14:50, sebelum run penuh dimulai; tidak ada reboot sejak 29 Okt.
+  2. Bukan rebutan sumber daya: tidak ada event Resource-Exhaustion, tidak ada
+     error/warning di log Application, Reliability Monitor hanya mencatat
+     pembaruan Defender, dan puncak pagefile sejak boot 3,9 dari 14 GB.
+  3. Socket yang disambungkan ke dirinya sendiri lalu dikirimi request seperti
+     `panggil_rpc` menghasilkan galat yang sama persis:
+     `http.client.BadStatusLine: 'POST / HTTP/1.1\r\n'`.
+  4. Dari 100.000 permintaan port otomatis, 200 jatuh di 18500–18699 dan 6 tepat
+     di port proyek.
+- **Perbaikan lapis 1 (lingkungan):** blok 18500–18699 dikecualikan dari
+  kumpulan port asal otomatis Windows (perlu admin, bertahan setelah reboot):
+  ```
+  netsh int ipv4 add excludedportrange protocol=tcp startport=18500 numberofports=200
+  ```
+  Rentang port dinamis global **tidak** diubah (tetap 1024–65535), karena belum
+  diketahui program apa yang menyetelnya. Bitcoin Core dan konfigurasinya juga
+  tidak diubah. Pembatalan:
+  `netsh int ipv4 delete excludedportrange protocol=tcp startport=18500 numberofports=200`.
+- **Perbaikan lapis 2 (kode):** `tunggu_rpc_siap` di `network.py` juga menangkap
+  `http.client.HTTPException` (induk `BadStatusLine`) dan memperlakukannya
+  sebagai "node belum siap", sehingga dicoba lagi. `trial.py`, `runner.py`,
+  seed, format CSV, dan konfigurasi node tidak berubah.
+- **Uji perbaikan:**
+  1. Sesudah exclusion, dari 100.000 permintaan port otomatis **0** jatuh di
+     18500–18699 (sebelumnya 200).
+  2. Bind eksplisit dan listen di 18501 tetap bisa, jadi bitcoind tetap bisa
+     memakai port proyek. (Self-connect dengan bind eksplisit masih mungkin,
+     tetapi itu tidak pernah dilakukan klien; crash berasal dari port otomatis.)
+  3. Uji unit: `panggil_rpc` palsu yang melempar `BadStatusLine` dua kali.
+     Kode lama langsung gagal di panggilan pertama; kode baru mencoba lagi dan
+     berhasil di panggilan ketiga.
+  4. Uji nyata di salinan terpisah yang port-nya berada di dalam blok yang
+     dikecualikan: 20 percobaan tanpa galat, **20/20 identik** dengan CSV run
+     penuh.
+- **Dampak ke hasil:** tidak ada. Percobaan yang crash tidak tercatat (baris
+  hanya ditulis setelah lolos verifikasi). Baris yang sudah ada tetap valid,
+  dan run dilanjutkan dari 24.571 baris.
+
 ---
 
 ## 8. Menjalankan run penuh di ROG
@@ -351,6 +407,16 @@ Ekstrak ke **root repo** sehingga programnya berada di:
 
 (Folder ini sengaja tidak ada di repo karena besar.) Jika Windows Firewall
 bertanya, akses cukup untuk jaringan privat; node hanya memakai 127.0.0.1.
+
+**Khusus Windows, cek rentang port dinamis (T11):**
+`netsh int ipv4 show dynamicport tcp`. Jika rentangnya mencakup port proyek
+(18501–18503, 18601–18603), mis. mulai dari 1024, kecualikan blok proyek
+dari port asal otomatis dengan PowerShell admin:
+```
+netsh int ipv4 add excludedportrange protocol=tcp startport=18500 numberofports=200
+```
+Hentikan run dulu sebelum menjalankannya: Windows bisa menolak exclusion bila
+ada port di blok itu yang sedang dipakai.
 
 ### 8.4 Cegah laptop tidur
 Run penuh berjalan berhari-hari. Atur power plan agar laptop tidak sleep/hibernate
@@ -435,6 +501,12 @@ bukan bukti peluang nol.
   rantainya berumur > 24 jam sebagai *Initial Block Download* dan berhenti
   meminta rantai penyerang setelah disambung kembali (T10). Konfigurasi node
   tidak diubah; hasil percobaan tidak bergantung pada baseline mana yang dipakai.
+- Di mesin Windows dengan rentang port dinamis tidak standar (ROG: 1024–65535),
+  blok port proyek 18500–18699 dikecualikan dari port asal otomatis Windows, dan
+  `tunggu_rpc_siap` mencoba ulang saat menerima `HTTPException`. Tujuannya
+  mencegah koneksi RPC tersambung ke dirinya sendiri (TCP self-connect, T11).
+  Ini perubahan lingkungan uji dan penanganan galat koneksi, bukan perubahan
+  Bitcoin Core atau konfigurasinya; hasil percobaan tidak terpengaruh.
 - Transaksi tidak disebarkan antar-node lewat relay biasa: tx A dikirim langsung
   ke merchant dan honest (relay Bitcoin Core sengaja diberi jeda acak). Latensi
   jaringan memang di luar lingkup.

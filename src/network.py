@@ -11,6 +11,7 @@ Logika serangan ada di trial.py.
 """
 
 import base64
+import http.client
 import json
 import os
 import shutil
@@ -164,8 +165,12 @@ def tunggu_rpc_siap(nama_node, batas_detik=30):
         try:
             panggil_rpc(nama_node, "getblockchaininfo")
             return
-        except (OSError, GalatRPC):
+        except (OSError, GalatRPC, http.client.HTTPException):
             # Node belum siap (port belum terbuka / masih memuat). Coba lagi.
+            # HTTPException ikut ditangkap: di Windows, koneksi ke port yang
+            # belum didengarkan bisa tersambung ke dirinya sendiri (TCP
+            # self-connect) dan menghasilkan BadStatusLine. Lihat
+            # brief/Dokumentasi.md temuan T11.
             time.sleep(0.2)
     raise TimeoutError(
         f"Node {nama_node} tidak siap dalam {batas_detik} detik"
