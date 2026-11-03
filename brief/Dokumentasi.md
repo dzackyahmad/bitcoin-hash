@@ -150,6 +150,8 @@ src/
   trial.py     baseline didanai, pembuatan tx A/tx B, cek anti-bocor, undian
                paralel, penentuan sukses, satu percobaan utuh (Langkah 1–7)
   runner.py    loop p × k × N, CSV inkremental, resumable, progres + perkiraan waktu
+  jaga_runner.py  menjalankan runner.py dan menyalakannya lagi bila crash,
+               sambil menyimpan bukti ke ..\bukti_crash_<waktu> (T13)
 brief/
   plan_eksekusi.md   rencana & parameter terkunci
   CLAUDE.md          konteks proyek
@@ -372,6 +374,105 @@ sesi berikutnya menimpa `node_data/` dan waktu ubah CSV.
   hanya ditulis setelah lolos verifikasi). Baris yang sudah ada tetap valid,
   dan run dilanjutkan dari 24.571 baris.
 
+**T12. File baseline dikunci proses lain saat node menyala (Windows, ROG).**
+Pukul 10.52 WIB tanggal 1 Nov run berhenti dengan
+`TimeoutError: Node merchant tidak siap dalam 30 detik` saat reset ke baseline
+(setelah p=0.20 k=4 i=727, 25.728 baris).
+- **Penyebab:** `debug.log` merchant (disalin sebelum run diulang) menunjukkan
+  bitcoind keluar di detik yang sama ia dinyalakan:
+  ```
+  Fatal LevelDB error: IO error: ...\merchant\regtest\blocks\index/000004.dbtmp:
+  Unable to remove the file to be replaced.
+  Error opening block database.
+  ```
+  Saat membuka database blok, LevelDB mengganti file `CURRENT` lewat file
+  `.dbtmp`; penggantian gagal karena file yang baru disalin dari baseline sedang
+  dibuka proses lain. Runner tidak memeriksa apakah proses masih hidup, jadi ia
+  tetap menunggu RPC selama 30 detik lalu melapor timeout. Proses pengunci
+  tidak bisa dipastikan setelah kejadian. Kandidat terkuat: pemindaian
+  real-time Windows Defender (aktif) dan Windows Search Indexer (aktif dan
+  mengindeks folder Downloads); keduanya membuka file yang baru ditulis. Crash
+  pukul 09.21 dengan gejala sama kemungkinan berpenyebab sama, tetapi log-nya
+  sudah tertimpa.
+- **Perbaikan lapis 1 (lingkungan):** `node_data` dan `node_data_baseline`
+  dikecualikan dari pemindaian Defender (PowerShell admin), dan folder proyek
+  dikeluarkan dari Windows Search lewat Indexing Options → Modify:
+  ```
+  Add-MpPreference -ExclusionPath "C:\Users\arvin\Downloads\bitcoin-hash\node_data","C:\Users\arvin\Downloads\bitcoin-hash\node_data_baseline"
+  ```
+  Pembatalan: `Remove-MpPreference -ExclusionPath ...` dengan path yang sama.
+- **Perbaikan lapis 2 (kode, `network.py`):** `tunggu_rpc_siap` melempar
+  `GalatNodeKeluar` begitu proses bitcoind sudah keluar, tanpa menunggu 30
+  detik. `reset_ke_baseline` menangkapnya, menyalin `node_data` ke
+  `..\bukti_crash_<waktu>` sebagai bukti, mencetak satu baris peringatan, lalu
+  mengulang dari salinan baseline baru (maksimal 3 kali menyala; setelah itu
+  galat dilempar dan run berhenti). `trial.py`, `runner.py`, seed, format CSV,
+  dan konfigurasi node tidak berubah.
+- **Uji perbaikan** (salinan terpisah, port 18511–18513/18611–18613; file
+  `CURRENT` merchant sengaja dibuka 1,5 detik setelah baseline disalin):
+  1. Galat yang muncul di `debug.log` sejenis dengan aslinya (`Fatal LevelDB
+     error ... being used by another process`, `Error opening block database`).
+  2. Dikunci sekali: node keluar terdeteksi, bukti tersalin, reset diulang, dan
+     percobaan p=0.05 k=0 i=1 selesai dengan hasil `True, 1, 0, menang`,
+     **identik** dengan baris di CSV run penuh.
+  3. Dikunci tiga kali berturut-turut: dua peringatan, lalu `GalatNodeKeluar`
+     dilempar dalam 11,5 detik; tidak ada bitcoind tertinggal.
+- **Dampak ke hasil:** tidak ada. Kegagalan terjadi saat reset, sebelum
+  percobaan dimulai, dan undian ditentukan oleh seed, sehingga percobaan yang
+  diulang menghasilkan baris yang sama. Run dilanjutkan dari 25.728 baris.
+- **Kejadian ulang & perbaikan lanjutan (2 Nov 08.51 WIB):** kuncian terjadi
+  lagi walaupun pengecualian Defender/Search aktif (honest:
+  `chainstate/000004.dbtmp: Unable to remove the file to be replaced`), jadi
+  ada proses lain yang ikut mengunci. Saat itu merchant sudah menyala, dan
+  penyalinan bukti di lapis 2 gagal (`shutil.Error`, file merchant terkunci)
+  sehingga pengulangan tidak berjalan; penjaga (T13) juga ikut berhenti karena
+  nama folder buktinya bentrok di detik yang sama. Run diam ±40 menit.
+  Perbaikan: node yang sudah menyala dimatikan dulu sebelum bukti disalin;
+  gagal menyalin bukti hanya dicetak sebagai peringatan; nama folder bukti
+  diberi akhiran `_2`, `_3`, ... bila sudah ada (`folder_bukti_baru`); penjaga
+  tetap menyalakan ulang walaupun bukti gagal disimpan. Uji di salinan
+  terpisah: kode lama mereproduksi `shutil.Error` yang sama; kode baru
+  mengulang reset dan percobaan selesai dengan hasil identik CSV run penuh;
+  batas 3 kali tetap berlaku tanpa bitcoind tertinggal.
+
+**T13. Merchant melihat 3 peer setelah penyerang disambung kembali (ROG).**
+Sekitar pukul 14.13 WIB tanggal 1 Nov (setelah heartbeat 28.008/63.000,
+p=0.25 k=0) run berhenti di `sambungkan_kembali_penyerang` dengan
+`TimeoutError: Node merchant punya 3 peer, diharapkan 2`: selama 10 detik
+merchant memegang satu koneksi lebih banyak dari seharusnya.
+- **Penyebab:** belum terbukti. Run dijalankan ulang sebelum `node_data`
+  disalin, sehingga log saat crash tertimpa. Selain itu, `debug.log` bawaan
+  hanya mencatat koneksi keluar ("New manual peer connected"); koneksi masuk
+  dan pemutusan tidak tercatat tanpa `-debug=net` (konfigurasi node sengaja
+  tidak diubah).
+- **Penanganan (operasional, bukan perbaikan akar masalah):** `jaga_runner.py`
+  menjalankan `runner.py`; bila runner crash, `node_data` dan pesan galat
+  disalin ke `..\bukti_crash_<waktu>`, lalu runner dinyalakan lagi setelah 30
+  detik (resumable). Penjaga tidak menyalakan ulang bila run selesai, bila
+  Ctrl+C, bila muncul `GalatVerifikasi`, atau bila 3 sesi berturut-turut crash
+  tanpa baris baru. `trial.py`, `runner.py`, `network.py`, seed, format CSV,
+  dan konfigurasi node tidak berubah.
+- **Uji penjaga:**
+  1. Salinan terpisah (port 1851x/1861x), 12 percobaan p=0.05 k=0; bitcoind
+     merchant dimatikan paksa di tengah percobaan. Penjaga mencatat crash,
+     menyimpan bukti (galat + `node_data`), menyalakan runner lagi, dan run
+     selesai normal. Ke-12 baris **identik** dengan CSV run penuh; tidak ada
+     bitcoind tertinggal.
+  2. Uji unit dengan sesi palsu: crash lalu selesai → 2 sesi; `GalatVerifikasi`
+     → berhenti; Ctrl+C → berhenti; crash tanpa kemajuan → berhenti setelah 3
+     sesi.
+  3. Perbaikan 2 Nov: versi pertama penjaga berhenti membaca stderr runner
+     setelah Ctrl+C. Traceback runner memenuhi pipe, runner macet menulis, dan
+     penjaga macet menunggu runner (Ctrl+C kedua tidak menolong di Windows).
+     Kini stderr tetap dibaca sampai habis. Simulasi (traceback palsu 200 KB
+     setelah Ctrl+C tiruan): versi lama macet sampai dihentikan paksa, versi
+     baru selesai dalam 2,1 detik. Pada kejadian nyata, node sudah dimatikan
+     runner dan baris CSV terakhir utuh sebelum proses yang macet dihentikan.
+- **Dampak ke hasil:** tidak ada. Percobaan yang crash (p=0.25 k=0 i=8) tidak
+  tercatat dan diulang setelah run dijalankan lagi; validasi 28.034 baris: 0
+  duplikat, 0 masalah. Bila crash ini berulang, bukti dari penjaga dipakai
+  untuk mencari akar masalahnya.
+
 ---
 
 ## 8. Menjalankan run penuh di ROG
@@ -418,6 +519,11 @@ netsh int ipv4 add excludedportrange protocol=tcp startport=18500 numberofports=
 Hentikan run dulu sebelum menjalankannya: Windows bisa menolak exclusion bila
 ada port di blok itu yang sedang dipakai.
 
+**Khusus Windows, kecualikan folder data node dari antivirus & pengindeks (T12):**
+PowerShell admin:
+`Add-MpPreference -ExclusionPath "<repo>\node_data","<repo>\node_data_baseline"`,
+lalu keluarkan folder repo dari Indexing Options → Modify.
+
 ### 8.4 Cegah laptop tidur
 Run penuh berjalan berhari-hari. Atur power plan agar laptop tidak sleep/hibernate
 saat dicolok listrik.
@@ -451,6 +557,10 @@ python src/runner.py
 - Progres (heartbeat) dicetak tiap 10 percobaan, contoh:
   `[2026-10-30 15:02:11] global 1240/63000 (2.0%) | sel (0.05, 1) 240/1000 | laju 0.169 trial/dtk | ETA 101:13:25`
   (waktu, posisi global, posisi di sel (p, k), laju percobaan per detik, perkiraan sisa waktu).
+- **Ditinggal tanpa ditunggui:** jalankan lewat penjaga,
+  `python src/jaga_runner.py` (argumen sama dengan runner). Bila runner crash,
+  bukti disimpan ke `..\bukti_crash_<waktu>` dan runner dinyalakan lagi otomatis
+  (T13). Baris penjaga diawali `[jaga]`.
 - **Jika berhenti** (Ctrl+C, listrik mati, restart Windows): jalankan ulang
   perintah yang sama. Runner membaca CSV, melewati percobaan yang sudah tercatat,
   membuang baris terakhir bila terpotong, mematikan node sisa, lalu melanjutkan.
@@ -507,6 +617,11 @@ bukan bukti peluang nol.
   mencegah koneksi RPC tersambung ke dirinya sendiri (TCP self-connect, T11).
   Ini perubahan lingkungan uji dan penanganan galat koneksi, bukan perubahan
   Bitcoin Core atau konfigurasinya; hasil percobaan tidak terpengaruh.
+- Di Windows, folder data node dikecualikan dari pemindaian antivirus dan
+  pengindeks berkas, dan runner mengulang reset ke baseline (maks. 3 kali) bila
+  bitcoind gagal membuka database blok karena file salinan baseline dikunci
+  proses lain (T12). Kegagalan terjadi sebelum percobaan dimulai dan undian
+  ditentukan seed, sehingga hasil percobaan tidak terpengaruh.
 - Transaksi tidak disebarkan antar-node lewat relay biasa: tx A dikirim langsung
   ke merchant dan honest (relay Bitcoin Core sengaja diberi jeda acak). Latensi
   jaringan memang di luar lingkup.

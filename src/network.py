@@ -90,6 +90,10 @@ class GalatRPC(Exception):
     """Galat yang dikembalikan node saat sebuah perintah RPC gagal."""
 
 
+class GalatNodeKeluar(Exception):
+    """Proses bitcoind sudah keluar sebelum RPC-nya siap (gagal menyala)."""
+
+
 def panggil_rpc(nama_node, perintah, *parameter):
     """
     Kirim satu perintah RPC ke node, lalu kembalikan hasilnya.
@@ -158,10 +162,19 @@ def tunggu_rpc_siap(nama_node, batas_detik=30):
     Tunggu sampai node siap menerima perintah RPC.
 
     Setelah dinyalakan, node butuh beberapa detik untuk memuat data.
-    Output: tidak ada; melempar TimeoutError jika node tidak siap tepat waktu.
+    Output: tidak ada; melempar TimeoutError jika node tidak siap tepat waktu,
+    atau GalatNodeKeluar jika proses bitcoind sudah keluar lebih dulu.
     """
+    proses = PROSES_NODE.get(nama_node)
     batas_waktu = time.time() + batas_detik
     while time.time() < batas_waktu:
+        # Proses sudah keluar (mis. gagal membuka database blok): tidak ada
+        # gunanya menunggu RPC. Lihat brief/Dokumentasi.md temuan T12.
+        if proses is not None and proses.poll() is not None:
+            raise GalatNodeKeluar(
+                f"Node {nama_node} keluar dengan kode {proses.returncode} "
+                f"sebelum RPC siap"
+            )
         try:
             panggil_rpc(nama_node, "getblockchaininfo")
             return
@@ -448,6 +461,26 @@ def simpan_baseline():
     shutil.copytree(FOLDER_DATA_NODE, FOLDER_BASELINE)
 
 
+# Berapa kali reset_ke_baseline mencoba menyalakan node dari salinan baseline
+# baru jika bitcoind langsung keluar saat menyala (temuan T12).
+BATAS_ULANG_NYALA = 3
+
+
+def folder_bukti_baru():
+    """
+    Kembalikan folder bukti crash yang belum ada: ..\\bukti_crash_<waktu>,
+    diberi akhiran _2, _3, ... bila nama itu sudah dipakai pada detik yang
+    sama. Folder belum dibuat.
+    """
+    dasar = f"bukti_crash_{time.strftime('%Y%m%d_%H%M%S')}"
+    folder = FOLDER_PROYEK.parent / dasar
+    nomor = 2
+    while folder.exists():
+        folder = FOLDER_PROYEK.parent / f"{dasar}_{nomor}"
+        nomor = nomor + 1
+    return folder
+
+
 def reset_ke_baseline():
     """
     Kembalikan jaringan ke kondisi baseline didanai: matikan ketiga node,
@@ -458,10 +491,38 @@ def reset_ke_baseline():
     """
     if not FOLDER_BASELINE.exists():
         raise RuntimeError("Baseline belum dibuat; jalankan pembuatan dulu")
-    matikan_semua_node()
-    hapus_semua_data_node()
-    shutil.copytree(FOLDER_BASELINE, FOLDER_DATA_NODE)
-    nyalakan_semua_node()
+    for percobaan_ke in range(1, BATAS_ULANG_NYALA + 1):
+        matikan_semua_node()
+        hapus_semua_data_node()
+        shutil.copytree(FOLDER_BASELINE, FOLDER_DATA_NODE)
+        try:
+            nyalakan_semua_node()
+            break
+        except GalatNodeKeluar as galat:
+            # Di Windows, file yang baru disalin kadang masih dikunci proses
+            # lain (antivirus/pengindeks) sehingga bitcoind gagal membuka
+            # database blok dan langsung keluar. Simpan buktinya, lalu ulangi
+            # dari salinan baseline baru. Lihat brief/Dokumentasi.md temuan T12.
+            if percobaan_ke == BATAS_ULANG_NYALA:
+                raise
+            # Matikan dulu node yang sudah menyala (mis. merchant saat honest
+            # yang gagal): file yang sedang dibuka bitcoind tidak bisa disalin.
+            matikan_semua_node()
+            folder_bukti = folder_bukti_baru()
+            try:
+                shutil.copytree(FOLDER_DATA_NODE, folder_bukti)
+                keterangan_bukti = f"bukti disalin ke {folder_bukti}"
+            except (shutil.Error, OSError) as galat_salin:
+                # Gagal menyimpan bukti tidak boleh menggagalkan pengulangan.
+                keterangan_bukti = (
+                    f"bukti gagal disalin ({type(galat_salin).__name__})"
+                )
+            print(
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Peringatan: {galat}; "
+                f"{keterangan_bukti}; menyalin ulang baseline "
+                f"(ulang {percobaan_ke}/{BATAS_ULANG_NYALA - 1})"
+            )
+            time.sleep(2)
     sambungkan_semua_node()
 
 
