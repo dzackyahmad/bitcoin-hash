@@ -258,10 +258,12 @@ dengan dan tanpa berhenti-awal (0 perbedaan). Implikasi:
 1. Di CSV, semua kegagalan tercatat `berhenti_awal`.
 2. Secara efektif aturan 20 blok = "serangan gagal bila rantai jujur mencapai 20
    blok lebih dulu".
-3. **Cara baca grafik:** rumus Nakamoto mengasumsikan perlombaan tanpa batas,
-   sedangkan di sini perlombaan dipotong di 20 blok. Hasil empiris bisa sedikit di
-   bawah kurva Nakamoto, paling terlihat di p = 0,45. Ini akibat aturan berhenti,
-   bukan kesalahan implementasi.
+3. **Cara baca grafik (dikoreksi setelah Tahap 5, lihat T14):** untuk k ≥ 1
+   hasil empiris konsisten di bawah kurva Nakamoto klasik, dan selisihnya besar
+   (mis. p = 0,10, k = 1: 2,8% vs 20,5%). Penyebab utamanya konvensi seri
+   dihitung kalah (≈ 89% dari total selisih); aturan berhenti 20 blok hanya
+   ≈ 10% dan baru terasa di p tinggi (p = 0,45: 5,7–9,5 poin). Bukan kesalahan
+   implementasi.
 
 **T6. Sisi merchant: `walletconflicts` kosong, konfirmasi menjadi negatif.**
 - Wallet merchant hanya menyimpan transaksi yang menyentuh alamatnya. tx B tidak
@@ -473,6 +475,47 @@ merchant memegang satu koneksi lebih banyak dari seharusnya.
   duplikat, 0 masalah. Bila crash ini berulang, bukti dari penjaga dipakai
   untuk mencari akar masalahnya.
 
+**T14. Selisih ke Nakamoto: validasi model dan dekomposisi (Tahap 5,
+`src/model_ideal.py`).** Hasil empiris konsisten jauh di bawah kurva Nakamoto
+untuk k ≥ 1 (mis. p = 0,10, k = 1: 2,8% vs 20,5%). Tiga kemungkinan penyebab
+dipisahkan: (a) perbedaan definisi, (b) batas give-up, (c) bug implementasi.
+- **Model pembanding:** `model_ideal.py` ditulis langsung dari definisi
+  matematis (Bernoulli(p) per blok, penyerang dan jujur mulai paralel dari titik
+  fork, tanpa pre-mine), tidak menyalin `trial.py`. Aturannya bisa disetel: seri
+  menang/kalah, batas give-up ada/tidak, syarat lunas n ≥ k.
+- **Validasi mesin:** MC dicek terhadap **rumus eksak** (binomial negatif +
+  gambler's ruin), bukan terhadap rumus Nakamoto, karena rumus Nakamoto sendiri
+  aproksimasi Poisson untuk jumlah blok penyerang. Tiga metode independen saling
+  cocok: MC vs rumus eksak (20 titik, semua |z| < 2; 30 ulangan × 200.000 per sel
+  tanpa bias), DP eksak vs rumus eksak (126 sel, selisih maks. 9×10⁻¹⁰), dan
+  hitung tangan k = 1 (konvensi Nakamoto) = 2q. Rumus Nakamoto berbeda sistematis
+  dari model eksak hingga ±3 poin (k kecil terlalu tinggi, k besar terlalu
+  rendah).
+- **Bitcoin Core vs model eksak aturan kita** (menang bila n ≥ k dan m > n;
+  gagal bila n mencapai 20; seri kalah), 63 sel: selisih rata-rata 0,78 poin,
+  maks. 3,7; tidak ada sel |z| > 3, 5 sel |z| > 2 (≈ 3 diharapkan), rata-rata
+  z = +0,19, Σz² = 70,9 (df = 63). Tidak ada bias sistematis, jadi tidak ada bug
+  yang terdeteksi. **Keterbatasan:** resolusinya ±3 poin per sel pada N = 1.000;
+  bug yang efeknya lebih kecil dari itu tidak akan terdeteksi.
+- **Dekomposisi selisih Nakamoto − aturan kita** (54 sel, k = 1–6, total 629,6
+  poin): seri dihitung kalah ≈ 89% (560,5 poin), batas 20 blok ≈ 10% (61,5),
+  interaksi keduanya ≈ −3% (−16,9), aproksimasi Poisson Nakamoto ≈ 4% (24,5);
+  jumlah keempatnya tepat sama dengan total. Efek seri paling besar pada p kecil
+  (p = 0,10, k = 1: 20,0% → 3,1%), efek batas baru berarti pada p tinggi.
+- **Kesimpulan:** selisih ini artefak perbedaan definisi, bukan bukti bahwa
+  "Bitcoin lebih aman dari teori". Rumus Nakamoto menghitung peluang penyerang
+  menyusul (rantai sama panjang cukup), sedangkan di sini penyerang harus
+  melampaui (m > n) tanpa pre-mine, sehingga praktis butuh satu blok lebih.
+  (Rosenfeld 2014 juga menghitung seri kalah, tetapi memberi 1 blok pre-mine,
+  sehingga setara konvensi Nakamoto.) Untuk aturan yang dipakai, Bitcoin Core
+  berperilaku persis seperti prediksi matematisnya.
+- **Implikasi penyajian:** pembanding yang adil adalah Bitcoin Core vs model
+  eksak aturan kita. Kurva Nakamoto disajikan sebagai referensi dengan konvensi
+  berbeda, disertai dekomposisi di atas.
+- **Berkas:** `results/model_ideal_langkah1_core_vs_model.csv` (63 sel: Core, MC
+  N = 1.000, eksak, z) dan `results/model_ideal_langkah2_ablation.csv` (54 sel:
+  Nakamoto, empat varian aturan, komponen selisih).
+
 ---
 
 ## 8. Menjalankan run penuh di ROG
@@ -603,9 +646,10 @@ bukan bukti peluang nol.
 - Hashrate penyerang diemulasikan lewat undian probabilistik, bukan daya tambang
   nyata. Eksperimen ini memverifikasi apakah implementasi Bitcoin Core nyata
   sesuai model pada kondisi ideal, bukan mengukur risiko mainnet.
-- Penyerang tidak melakukan pre-mine; seri dihitung gagal.
-- Aturan berhenti 20 blok (Rosenfeld 2014) memotong perlombaan; lihat T5 untuk
-  dampaknya pada perbandingan dengan Nakamoto.
+- Penyerang tidak melakukan pre-mine; seri dihitung gagal. Konvensi ini
+  penyumbang utama (≈ 89%) selisih hasil terhadap kurva Nakamoto klasik (T14).
+- Aturan berhenti 20 blok (Rosenfeld 2014) memotong perlombaan; lihat T5 dan T14
+  untuk dampaknya pada perbandingan dengan Nakamoto (≈ 10% dari selisih).
 - Baseline didanai (fixture awal tiap percobaan) dibuat ulang tiap ≤ 20 jam,
   karena Bitcoin Core dengan setting default memperlakukan node yang ujung
   rantainya berumur > 24 jam sebagai *Initial Block Download* dan berhenti
