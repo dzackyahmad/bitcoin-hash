@@ -674,9 +674,22 @@ bukan bukti peluang nol.
 
 ## 11. Langkah berikutnya
 
-- **Tahap 3 (sisa):** run penuh 63.000 percobaan di ROG → `results/hasil_percobaan.csv`.
-- **Tahap 4 — `src/analysis.py`:** hitung persentase keberhasilan per (p, k),
-  tabel, grafik garis (X = k, satu garis per p), dan kurva Nakamoto (z = k)
-  pada grafik yang sama. Butuh pandas dan matplotlib.
-- **Tahap 5:** rekomendasi konfirmasi minimum per p, temuan sisi merchant (T6),
-  batasan, dan pembaruan dokumen ini sesuai kode final.
+**Sudah selesai (Tahap 0–5):**
+- Tahap 0–3: setup, jaringan 3 node, satu percobaan, dan run penuh 63.000
+  percobaan di ROG → `results/hasil_percobaan.csv` (terverifikasi: 63 sel × 1.000,
+  0 duplikat, 0 baris rusak, tiap baris identik saat diputar ulang dari seed).
+- Tahap 4 (`src/analysis.py`): tabel keberhasilan p × k, tabel prediksi
+  Nakamoto, dan grafik empiris vs Nakamoto (`results/`, `figures/`).
+- Tahap 5 (`src/model_ideal.py`): validasi model eksak dan dekomposisi selisih
+  ke Nakamoto (T14).
+- Dependensi analisis dipin di `requirements.txt`.
+
+**Tersisa: penulisan laporan dan finalisasi.**
+- BAB II (tinjauan pustaka: Nakamoto 2008, Rosenfeld 2014, perbedaan konvensi
+  seri/pre-mine).
+- BAB IV (hasil dan pembahasan): tabel dan grafik Tahap 4, perbandingan adil
+  Bitcoin Core vs model eksak aturan kita, dekomposisi selisih ke Nakamoto
+  (T14), rekomendasi konfirmasi minimum per p, dan temuan sisi merchant (T6).
+- BAB V (kesimpulan dan saran), termasuk batasan bagian 10 (T10–T14).
+- Finalisasi: cocokkan BAB III dengan kode, periksa angka di laporan terhadap
+  berkas `results/`.

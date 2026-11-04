@@ -1,0 +1,6 @@
+# Dependensi analisis (src/analysis.py, src/model_ideal.py). Eksperimen
+# (network.py, trial.py, runner.py, jaga_runner.py) hanya memakai pustaka
+# standar Python. Versi = yang terpasang saat analisis dijalankan (Python 3.11.9).
+matplotlib==3.11.2
+numpy==2.4.6
+pandas==3.1.0
